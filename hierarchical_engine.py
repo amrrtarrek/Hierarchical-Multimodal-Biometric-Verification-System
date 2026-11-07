@@ -24,15 +24,11 @@ import numpy as np
 
 from early_fusion import EarlyFeatureFusionExtractor, EarlyFusionMultimodalModel
 from interfaces import (
-    FACE_DIM,
     IMPOSTOR_CLASS,
-    PRINT_DIM,
     STATUS_PERMISSION_DENIED,
     STATUS_REJECTED_IMPOSTOR,
     STATUS_VERIFIED,
-    VOICE_DIM,
     BaseBiometricModel,
-    BaseFeatureExtractor,
     DecisionRecord,
 )
 
@@ -47,11 +43,11 @@ RBAC_PERMISSIONS: Dict[int, Set[str]] = {
 
 
 def check_rbac_permission(identity: int, command: str) -> bool:
-    """Evaluate RBAC authorization for a verified identity and spoken command."""
+    """Return True if `identity` is authorized to run `command`, else False."""
     if int(identity) <= IMPOSTOR_CLASS:
         return False
-    allowed = RBAC_PERMISSIONS.get(int(identity), {"Report Status"})
-    return str(command).strip() in allowed
+    allowed_commands = RBAC_PERMISSIONS.get(int(identity), {"Report Status"})
+    return str(command).strip() in allowed_commands
 
 
 class HierarchicalVerificationEngine:
@@ -63,72 +59,60 @@ class HierarchicalVerificationEngine:
         voice_model: BaseBiometricModel,
         fusion_model: BaseBiometricModel,
         command_model: Optional[BaseBiometricModel] = None,
-        rbac_checker: Optional[Any] = None,
-        face_extractor: Optional[BaseFeatureExtractor] = None,
-        voice_extractor: Optional[BaseFeatureExtractor] = None,
-        print_extractor: Optional[BaseFeatureExtractor] = None,
         fusion_extractor: Optional[EarlyFeatureFusionExtractor] = None,
     ) -> None:
         self.face_model = face_model
         self.voice_model = voice_model
         self.fusion_model = fusion_model
         self.command_model = command_model
-        self.rbac_checker = rbac_checker
-        self.face_extractor = face_extractor
-        self.voice_extractor = voice_extractor
-        self.print_extractor = print_extractor
         self.fusion_extractor = fusion_extractor
 
     @staticmethod
-    def _predict_probs(model: BaseBiometricModel, x: np.ndarray) -> Tuple[int, float, int, float]:
-        """Return (top_class, top_prob, best_genuine_class, best_genuine_prob)."""
-        probs = np.asarray(model.predict_proba(x), dtype=np.float64).ravel()
-        classes = getattr(model, "classes_", None)
-        classes = np.asarray(classes, dtype=np.int64) if classes is not None else np.arange(len(probs))
+    def _get_prediction(model: BaseBiometricModel, x_vec: Any) -> Tuple[int, float, int, float]:
+        """
+        Run `model.predict_proba(x_vec)` and return:
+        (top_class, top_prob, best_genuine_class, best_genuine_prob)
+        """
+        inp = x_vec if isinstance(x_vec, tuple) else np.atleast_2d(x_vec)
+        probs = np.asarray(model.predict_proba(inp), dtype=np.float64)[0]
+        classes = np.asarray(model.classes_, dtype=np.int64)
 
+        # Overall top predicted class (could be Class 0 Impostor or a Genuine ID)
         top_idx = int(np.argmax(probs))
-        top_cls, top_prob = int(classes[top_idx]), float(probs[top_idx])
+        top_class = int(classes[top_idx])
+        top_prob = float(probs[top_idx])
 
-        gen_mask = classes != IMPOSTOR_CLASS
-        gen_indices = np.where(gen_mask)[0]
-        best_gen_idx = int(gen_indices[int(np.argmax(probs[gen_indices]))])
-        return top_cls, top_prob, int(classes[best_gen_idx]), float(probs[best_gen_idx])
+        # Highest probability among genuine enrolled subjects (excluding Class 0)
+        genuine_mask = classes != IMPOSTOR_CLASS
+        gen_classes = classes[genuine_mask]
+        gen_probs = probs[genuine_mask]
+        best_gen_idx = int(np.argmax(gen_probs))
+        best_gen_class = int(gen_classes[best_gen_idx])
+        best_gen_prob = float(gen_probs[best_gen_idx])
 
-    @staticmethod
-    def _to_vector(sample: Any, dim: int, extractor: Optional[BaseFeatureExtractor]) -> np.ndarray:
-        arr = np.asarray(sample, dtype=np.float32)
-        if arr.ndim == 1 and arr.size == dim:
-            return arr.reshape(1, dim)
-        if arr.ndim == 2 and arr.shape == (1, dim):
-            return arr
-        if extractor is not None:
-            return extractor.transform(sample)
-        raise ValueError(f"Expected {dim}D feature vector or a configured extractor.")
-
-    def _is_authorized(self, identity: int, command: str) -> bool:
-        if self.rbac_checker is not None:
-            if hasattr(self.rbac_checker, "is_authorized"):
-                return bool(self.rbac_checker.is_authorized(identity, command))
-            if callable(self.rbac_checker):
-                return bool(self.rbac_checker(identity, command))
-        return check_rbac_permission(identity, command)
+        return top_class, top_prob, best_gen_class, best_gen_prob
 
     def verify(
         self,
-        face_input: Any,
-        voice_input: Optional[Any] = None,
-        print_input: Optional[Any] = None,
+        face_vec: np.ndarray,
+        voice_vec: Optional[np.ndarray] = None,
+        print_vec: Optional[np.ndarray] = None,
         command: Optional[str] = None,
     ) -> DecisionRecord:
         """Execute Stage 1 -> Stage 2 -> Stage 3 hierarchical verification."""
-        # --- STAGE 1: FACE SCREENING ---
-        x_face = self._to_vector(face_input, FACE_DIM, self.face_extractor)
-        f_top_cls, _, f_gen_cls, p_face = self._predict_probs(self.face_model, x_face)
 
-        if f_top_cls != IMPOSTOR_CLASS and p_face >= 0.88:
+        # =====================================================================
+        # STAGE 1: FACE SCREENING
+        # If P_face >= 0.88 -> VERIFIED at Stage 1
+        # If P_face < 0.35  -> REJECTED_IMPOSTOR at Stage 1
+        # Else (0.35 <= P_face < 0.88) -> Escalate to Stage 2
+        # =====================================================================
+        face_top_cls, _, face_id, p_face = self._get_prediction(self.face_model, face_vec)
+
+        if face_top_cls != IMPOSTOR_CLASS and p_face >= 0.88:
             return DecisionRecord(
                 status=STATUS_VERIFIED,
-                identity=f_gen_cls,
+                identity=face_id,
                 command=command or "N/A",
                 stage=1,
                 confidence=p_face,
@@ -143,52 +127,58 @@ class HierarchicalVerificationEngine:
                 confidence=p_face,
             )
 
-        # --- STAGE 2: VOICE & COMMAND + RBAC ---
-        if voice_input is None:
-            raise ValueError("Escalated to Stage 2, but voice_input was not provided.")
-        x_voice = self._to_vector(voice_input, VOICE_DIM, self.voice_extractor)
-        v_top_cls, v_top_prob, _, p_voice_gen = self._predict_probs(self.voice_model, x_voice)
-        p_voice = v_top_prob if v_top_cls != IMPOSTOR_CLASS else p_voice_gen
+        # =====================================================================
+        # STAGE 2: VOICE & COMMAND + RBAC
+        # If Voice_ID == Face_ID and P_voice >= 0.75 -> Check RBAC permission
+        # Else -> Escalate to Stage 3
+        # =====================================================================
+        if voice_vec is None:
+            raise ValueError("Stage 1 escalated to Stage 2, but voice_vec was not provided.")
+
+        voice_id, p_voice, _, _ = self._get_prediction(self.voice_model, voice_vec)
 
         if command is not None:
             spoken_cmd = str(command)
         elif self.command_model is not None:
-            spoken_cmd = str(np.asarray(self.command_model.predict(x_voice)).ravel()[0])
+            spoken_cmd = str(self.command_model.predict(np.atleast_2d(voice_vec))[0])
         else:
             spoken_cmd = "Report Status"
 
-        if v_top_cls == f_gen_cls and v_top_cls != IMPOSTOR_CLASS and p_voice >= 0.75:
-            status = STATUS_VERIFIED if self._is_authorized(v_top_cls, spoken_cmd) else STATUS_PERMISSION_DENIED
+        if voice_id == face_id and voice_id != IMPOSTOR_CLASS and p_voice >= 0.75:
+            is_allowed = check_rbac_permission(voice_id, spoken_cmd)
+            status = STATUS_VERIFIED if is_allowed else STATUS_PERMISSION_DENIED
             return DecisionRecord(
                 status=status,
-                identity=v_top_cls,
+                identity=voice_id,
                 command=spoken_cmd,
                 stage=2,
                 confidence=p_voice,
             )
 
-        # --- STAGE 3: FULL MULTIMODAL ARBITRATION ---
-        if print_input is None:
-            raise ValueError("Escalated to Stage 3, but print_input was not provided.")
-        x_print = self._to_vector(print_input, PRINT_DIM, self.print_extractor)
+        # =====================================================================
+        # STAGE 3: FULL MULTIMODAL ARBITRATION (686D Early Fusion + SVM)
+        # If P_fused >= 0.60 and class != 0 -> VERIFIED at Stage 3
+        # Else -> REJECTED_IMPOSTOR at Stage 3
+        # =====================================================================
+        if print_vec is None:
+            raise ValueError("Stage 2 escalated to Stage 3, but print_vec was not provided.")
 
         if isinstance(self.fusion_model, EarlyFusionMultimodalModel):
-            probs = np.asarray(self.fusion_model.predict_proba((x_face, x_voice, x_print)), dtype=np.float64).ravel()
-            classes = np.asarray(self.fusion_model.classes_, dtype=np.int64)
-            top_idx = int(np.argmax(probs))
-            m_top_cls, p_fused = int(classes[top_idx]), float(probs[top_idx])
+            fused_id, p_fused, _, _ = self._get_prediction(
+                self.fusion_model, (face_vec, voice_vec, print_vec)
+            )
         else:
             x_fused = (
-                self.fusion_extractor.transform((x_face, x_voice, x_print))
+                self.fusion_extractor.transform((face_vec, voice_vec, print_vec))
                 if self.fusion_extractor is not None
-                else np.hstack([x_face, x_voice, x_print]).astype(np.float32)
+                else np.hstack([np.atleast_2d(face_vec), np.atleast_2d(voice_vec), np.atleast_2d(print_vec)])
             )
-            m_top_cls, p_fused, _, _ = self._predict_probs(self.fusion_model, x_fused)
+            fused_id, p_fused, _, _ = self._get_prediction(self.fusion_model, x_fused)
 
-        if m_top_cls != IMPOSTOR_CLASS and p_fused >= 0.60:
+        if fused_id != IMPOSTOR_CLASS and p_fused >= 0.60:
             return DecisionRecord(
                 status=STATUS_VERIFIED,
-                identity=m_top_cls,
+                identity=fused_id,
                 command=spoken_cmd,
                 stage=3,
                 confidence=p_fused,
@@ -204,11 +194,12 @@ class HierarchicalVerificationEngine:
 
     def verify_batch(
         self,
-        X_face: Sequence[Any],
-        X_voice: Sequence[Any],
-        X_print: Sequence[Any],
+        X_face: Sequence[np.ndarray],
+        X_voice: Sequence[np.ndarray],
+        X_print: Sequence[np.ndarray],
         command: str = "Report Status",
     ) -> List[DecisionRecord]:
+        """Verify a batch of samples through the 3-stage pipeline."""
         return [
             self.verify(X_face[i], X_voice[i], X_print[i], command=command)
             for i in range(len(X_face))
