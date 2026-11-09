@@ -94,6 +94,8 @@ def verify_dataset(processed_root: str) -> bool:
     """Definition of Done check: verify 100x100 uint8 range [0, 255]."""
     all_ok = True
     for subject in sorted(os.listdir(processed_root)):
+        if subject in ("voice", "fingerprint"):
+            continue
         subject_dir = os.path.join(processed_root, subject)
         if not os.path.isdir(subject_dir):
             continue
