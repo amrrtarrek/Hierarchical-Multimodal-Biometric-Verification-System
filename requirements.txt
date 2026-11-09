@@ -23,3 +23,9 @@ pytest-cov>=4.1.0
 # Analysis & Visualizations
 matplotlib>=3.7.0
 
+# Acoustic Conditioning, Feature Extraction & Live Audio Stream (Tasks 2.1 - 2.4 - Member 2)
+soundfile>=0.12.1
+imageio-ffmpeg>=0.4.9
+sounddevice>=0.4.6
+
+

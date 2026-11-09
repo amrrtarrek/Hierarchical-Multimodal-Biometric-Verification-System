@@ -22,6 +22,9 @@ Thumbs.db
 # Large raw datasets (keep fixtures and tracked artifacts)
 data/raw/
 *.wav
+!data/processed/voice/
+!data/processed/voice/**/*.wav
+!data/processed/voice/*.npy
 *.mp4
 *.avi
 
