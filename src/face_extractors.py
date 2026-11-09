@@ -12,9 +12,48 @@ if PROJECT_ROOT not in sys.path:
 
 import numpy as np
 import cv2
-from skimage.feature import local_binary_pattern
+try:
+    from skimage.feature import local_binary_pattern
+except ImportError:
+    local_binary_pattern = None
 from sklearn.decomposition import PCA
 from src.base_interfaces import BaseFeatureExtractor
+
+
+def _numpy_nri_uniform_lbp_p8_r2(img: np.ndarray) -> np.ndarray:
+    """Pure-NumPy fallback for P=8, R=2 non-rotation-invariant uniform LBP (59 bins: 0..58)."""
+    # Precompute lookup table mapping 8-bit code (0..255) -> uniform bin (0..58)
+    lut = np.full(256, 58, dtype=np.int32)
+    u_idx = 0
+    for code in range(256):
+        bits = [(code >> b) & 1 for b in range(8)]
+        transitions = sum(bits[b] != bits[(b + 1) % 8] for b in range(8))
+        if transitions <= 2:
+            lut[code] = u_idx
+            u_idx += 1
+
+    f_img = img.astype(np.float32)
+    padded = np.pad(f_img, 2, mode="constant", constant_values=0.0)
+    h, w = f_img.shape[:2]
+    center = padded[2 : 2 + h, 2 : 2 + w]
+
+    # 8 circular neighbors at R=2 (angles 0, pi/4, ..., 7pi/4)
+    offsets = [
+        (0.0, 2.0), (-1.4142135, 1.4142135), (-2.0, 0.0), (-1.4142135, -1.4142135),
+        (0.0, -2.0), (1.4142135, -1.4142135), (2.0, 0.0), (1.4142135, 1.4142135),
+    ]
+    code_map = np.zeros((h, w), dtype=np.int32)
+    for p, (dy, dx) in enumerate(offsets):
+        y0, x0 = int(np.floor(dy)), int(np.floor(dx))
+        fy, fx = dy - y0, dx - x0
+        n00 = padded[2 + y0 : 2 + y0 + h, 2 + x0 : 2 + x0 + w]
+        n01 = padded[2 + y0 : 2 + y0 + h, 2 + x0 + 1 : 2 + x0 + 1 + w] if fx > 0 else n00
+        n10 = padded[2 + y0 + 1 : 2 + y0 + 1 + h, 2 + x0 : 2 + x0 + w] if fy > 0 else n00
+        n11 = padded[2 + y0 + 1 : 2 + y0 + 1 + h, 2 + x0 + 1 : 2 + x0 + 1 + w] if (fx > 0 and fy > 0) else n00
+        neighbor = (1 - fy) * ((1 - fx) * n00 + fx * n01) + fy * ((1 - fx) * n10 + fx * n11)
+        code_map |= ((neighbor >= center - 1e-5).astype(np.int32) << p)
+
+    return lut[code_map].astype(np.float32)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -142,7 +181,10 @@ class LBPExtractor(BaseFeatureExtractor):
         return self
 
     def _extract_one(self, img: np.ndarray) -> np.ndarray:
-        lbp_map = local_binary_pattern(img, P=self.n_points, R=self.radius, method="nri_uniform")
+        if local_binary_pattern is not None:
+            lbp_map = local_binary_pattern(img, P=self.n_points, R=self.radius, method="nri_uniform")
+        else:
+            lbp_map = _numpy_nri_uniform_lbp_p8_r2(img)
         h, w = img.shape[:2]
         ch, cw = h // self.grid, w // self.grid
         hist_all = []

@@ -253,5 +253,12 @@ def train_and_select_best(processed_root: str = "data/processed", model_output_d
     return artifact
 
 
+FaceSVMModel.__module__ = "src.face_classifiers"
+FaceRFModel.__module__ = "src.face_classifiers"
+import __main__ as _main_mod
+for _c in (FaceSVMModel, FaceRFModel, HOGExtractor, LBPExtractor, PCAFaceExtractor):
+    setattr(_main_mod, _c.__name__, _c)
+
+
 if __name__ == "__main__":
     train_and_select_best()
